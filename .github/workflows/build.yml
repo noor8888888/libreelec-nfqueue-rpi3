@@ -11,7 +11,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -24,16 +24,46 @@ jobs:
             make \
             gcc-arm-linux-gnueabihf \
             crossbuild-essential-armhf \
-            rsync
+            rsync \
+            ccache \
+            python3 \
+            python3-distutils
 
       - name: Clone LibreELEC 12.2.1
         run: |
-          git clone --depth 1 --branch 12.2.1 \
+          git clone --branch 12.2.1 \
             https://github.com/LibreELEC/LibreELEC.tv.git
-          cd LibreELEC.tv
-          git submodule update --init --recursive
 
-      - name: Show LibreELEC version
+      - name: Verify LibreELEC version
         run: |
           cd LibreELEC.tv
           git describe --tags --always
+
+      - name: Download LibreELEC RPi2 sources
+        run: |
+          cd LibreELEC.tv
+
+          PROJECT=RPi DEVICE=RPi2 ARCH=arm \
+            tools/download-tool
+
+      - name: Show kernel configuration
+        run: |
+          cd LibreELEC.tv
+
+          echo "=== Kernel config ==="
+          find projects/RPi -type f -name '*linux*conf' -o -name '*.conf' | sort
+
+          echo "=== NFQUEUE options in config ==="
+          grep -R \
+            -E 'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE' \
+            projects/RPi/devices/RPi2 2>/dev/null || true
+
+      - name: Show Raspberry Pi kernel version
+        run: |
+          cd LibreELEC.tv
+
+          echo "=== Raspberry Pi kernel package ==="
+          grep -A8 -B2 'LINUX_VERSION\|PKG_VERSION.*6.12' \
+            packages/linux/package.mk \
+            projects/RPi/packages/linux/package.mk \
+            2>/dev/null || true
