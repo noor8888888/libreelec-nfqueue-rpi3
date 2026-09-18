@@ -8,12 +8,14 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install build tools
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             git \
             bc \
@@ -26,63 +28,113 @@ jobs:
             kmod \
             cpio \
             xz-utils \
-            tar
+            tar \
+            rsync
 
       - name: Clone exact Raspberry Pi kernel
         run: |
-          git clone https://github.com/raspberrypi/linux.git linux
+          set -e
+
+          git clone \
+            https://github.com/raspberrypi/linux.git \
+            linux
+
           cd linux
+
           git checkout 78fd5c93f1568d0dac7c56ee3d497739a63b058e
 
-      - name: Copy LibreELEC RPi2 config
+          echo "=== Raspberry Pi kernel commit ==="
+          git rev-parse HEAD
+
+      - name: Clone LibreELEC 12.2.1
         run: |
-          git clone --branch 12.2.1 --depth 1 \
-            https://github.com/LibreELEC/LibreELEC.tv.git libreelec
+          set -e
+
+          git clone \
+            --branch 12.2.1 \
+            --depth 1 \
+            https://github.com/LibreELEC/LibreELEC.tv.git \
+            libreelec
+
+      - name: Copy LibreELEC kernel configuration
+        run: |
+          set -e
 
           cp \
             libreelec/projects/RPi/devices/RPi2/linux/linux.arm.conf \
             linux/.config
 
-      - name: Enable NFQUEUE modules
+          echo "=== LibreELEC kernel configuration ==="
+
+          grep -E \
+            'CONFIG_NETFILTER|CONFIG_NF|CONFIG_XTABLES' \
+            linux/.config | head -100 || true
+
+      - name: Enable required NFQUEUE configuration
         working-directory: linux
         run: |
-          sed -i \
-            's/^# CONFIG_NETFILTER_NETLINK_QUEUE is not set$/CONFIG_NETFILTER_NETLINK_QUEUE=m/' \
-            .config
+          set -e
 
-          sed -i \
-            's/^# CONFIG_NETFILTER_XT_TARGET_NFQUEUE is not set$/CONFIG_NETFILTER_XT_TARGET_NFQUEUE=m/' \
-            .config
+          echo "=== Enabling NFQUEUE ==="
 
-          echo "=== Requested configuration ==="
+          ./scripts/config --enable CONFIG_NETFILTER
+          ./scripts/config --enable CONFIG_NETFILTER_NETLINK
+          ./scripts/config --module CONFIG_NETFILTER_NETLINK_QUEUE
+
+          ./scripts/config --enable CONFIG_NETFILTER_XTABLES
+          ./scripts/config --module CONFIG_NETFILTER_XT_TARGET_NFQUEUE
+
+          echo "=== NFQUEUE configuration before olddefconfig ==="
+
           grep -E \
-            'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE' \
-            .config
+            'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE|CONFIG_NETFILTER_NETLINK=|CONFIG_NETFILTER_XTABLES=' \
+            .config || true
+
+      - name: Prepare kernel configuration
+        working-directory: linux
+        run: |
+          set -e
+
+          make \
+            ARCH=arm \
+            CROSS_COMPILE=arm-linux-gnueabihf- \
+            olddefconfig
+
+          echo "=== NFQUEUE configuration after olddefconfig ==="
+
+          grep -E \
+            'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE|CONFIG_NETFILTER_NETLINK=|CONFIG_NETFILTER_XTABLES=' \
+            .config || true
 
       - name: Prepare kernel tree
         working-directory: linux
         run: |
-          make ARCH=arm \
-            CROSS_COMPILE=arm-linux-gnueabihf- \
-            olddefconfig
+          set -e
 
-          make ARCH=arm \
+          make \
+            ARCH=arm \
             CROSS_COMPILE=arm-linux-gnueabihf- \
             modules_prepare
 
-      - name: Build NFQUEUE modules
+      - name: Build nfnetlink_queue module
         working-directory: linux
         run: |
-          make -j2 ARCH=arm \
+          set -e
+
+          echo "=== Building nfnetlink_queue ==="
+
+          make -j2 \
+            ARCH=arm \
             CROSS_COMPILE=arm-linux-gnueabihf- \
             M=net/netfilter \
             modules
 
-      - name: Find modules
+      - name: Show resulting modules
         working-directory: linux
         run: |
-          echo "=== Found modules ==="
-          find . -type f \
+          echo "=== NFQUEUE modules ==="
+
+          find net -type f \
             \( \
               -name 'nfnetlink_queue.ko' \
               -o \
@@ -90,42 +142,70 @@ jobs:
             \) \
             -print
 
-      - name: Check module metadata
+      - name: Check module information
         working-directory: linux
         run: |
-          echo "=== Module metadata ==="
+          set -e
+
+          echo "=== Module information ==="
 
           for module in \
-            $(find . -type f \( \
-              -name 'nfnetlink_queue.ko' \
-              -o \
-              -name 'xt_NFQUEUE.ko' \
-            \)); do
-            echo "----- $module -----"
-            modinfo "$module" || true
+            $(find net -type f \
+              \( \
+                -name 'nfnetlink_queue.ko' \
+                -o \
+                -name 'xt_NFQUEUE.ko' \
+              \)); do
+
+            echo
+            echo "========================================"
+            echo "$module"
+            echo "========================================"
+
             file "$module"
+
+            modinfo "$module" || true
+
           done
+
+      - name: Verify required modules exist
+        working-directory: linux
+        run: |
+          set -e
+
+          echo "=== Verifying modules ==="
+
+          test -f net/netfilter/nfnetlink_queue.ko
+          test -f net/netfilter/xt_NFQUEUE.ko
+
+          echo
+          echo "SUCCESS:"
+          echo "nfnetlink_queue.ko exists"
+          echo "xt_NFQUEUE.ko exists"
 
       - name: Package modules
         run: |
-          mkdir -p artifact/lib/modules/6.12.56
+          set -e
 
-          find linux -type f \
-            \( \
-              -name 'nfnetlink_queue.ko' \
-              -o \
-              -name 'xt_NFQUEUE.ko' \
-            \) \
-            -exec cp {} artifact/lib/modules/6.12.56/ \;
+          mkdir -p artifact/lib/modules/6.12.56/kernel/net/netfilter
+
+          cp \
+            linux/net/netfilter/nfnetlink_queue.ko \
+            artifact/lib/modules/6.12.56/kernel/net/netfilter/
+
+          cp \
+            linux/net/netfilter/xt_NFQUEUE.ko \
+            artifact/lib/modules/6.12.56/kernel/net/netfilter/
 
           echo "=== Artifact contents ==="
+
           find artifact -type f -ls
 
           tar -czf \
             nfqueue-modules-rpi3-6.12.56.tar.gz \
             -C artifact .
 
-      - name: Upload modules
+      - name: Upload NFQUEUE modules
         uses: actions/upload-artifact@v4
         with:
           name: nfqueue-modules-rpi3-6.12.56
