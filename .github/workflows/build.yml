@@ -1,4 +1,4 @@
-name: Build LibreELEC NFQUEUE modules
+name: Build LibreELEC 12.2.1 NFQUEUE modules
 
 on:
   workflow_dispatch:
@@ -8,46 +8,285 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+
+      # ============================================================
+      # 1. Получаем наш репозиторий
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      # ============================================================
+      # 2. Устанавливаем зависимости LibreELEC 12.2.1
+      #
+      # Проверено по scripts/checkdeps данного тега.
+      # ============================================================
+      - name: Install LibreELEC build dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
+            bash \
             bc \
-            curl \
-            g++ \
+            bzip2 \
+            diffutils \
+            gawk \
             gcc \
-            git \
+            g++ \
             gperf \
+            gzip \
+            file \
+            patchutils \
+            lzop \
             make \
-            openjdk-11-jre-headless \
-            rsync \
+            patch \
+            perl \
+            rdfind \
+            sed \
+            tar \
             unzip \
-            xfonts-utils \
-            xsltproc \
+            wget \
             xz-utils \
             zip \
+            zstd \
+            libc6-dev \
+            libncurses5-dev \
+            libjson-perl \
+            libparse-yapp-perl \
+            libxml-parser-perl \
+            xfonts-utils \
+            xsltproc \
+            default-jre \
             python3 \
-            python3-pip \
-            wget
+            kmod \
+            curl \
+            git \
+            rsync
 
+      # ============================================================
+      # 3. Клонируем ИМЕННО LibreELEC 12.2.1
+      # ============================================================
       - name: Clone LibreELEC 12.2.1
         run: |
-          git clone --depth 1 --branch 12.2.1 \
+          git clone \
+            --depth 1 \
+            --branch 12.2.1 \
             https://github.com/LibreELEC/LibreELEC.tv.git \
             libreelec
 
-      - name: Enable NFQUEUE
+      # ============================================================
+      # 4. Проверяем, что получили именно 12.2.1
+      # ============================================================
+      - name: Verify LibreELEC version
+        working-directory: libreelec
+        run: |
+          TAG=$(git describe --tags --exact-match HEAD)
+
+          echo "LibreELEC tag: $TAG"
+
+          test "$TAG" = "12.2.1"
+
+      # ============================================================
+      # 5. Проверяем зависимости официальным LibreELEC checkdeps
+      #
+      # XML::Parser здесь уже установлен через libxml-parser-perl.
+      # ============================================================
+      - name: Verify LibreELEC host dependencies
+        working-directory: libreelec
+        run: |
+          ./scripts/checkdeps
+
+      # ============================================================
+      # 6. Освобождаем место GitHub runner
+      # ============================================================
+      - name: Free runner disk space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+
+          echo
+          echo "=== Disk space after cleanup ==="
+          df -h
+
+      # ============================================================
+      # 7. Проверяем и исправляем URL libtool
+      #
+      # В LibreELEC 12.2.1 исходный URL:
+      #
+      # http://ftpmirror.gnu.org/libtool/...
+      #
+      # Меняем только URL.
+      # Версию 2.4.7 и SHA256 НЕ меняем.
+      # ============================================================
+      - name: Fix libtool source URL
+        working-directory: libreelec
+        run: |
+          OLD_URL='http://ftpmirror.gnu.org/libtool/${PKG_NAME}-${PKG_VERSION}.tar.gz'
+          NEW_URL='https://ftp.gnu.org/gnu/libtool/${PKG_NAME}-${PKG_VERSION}.tar.gz'
+
+          echo "Checking original URL..."
+
+          grep -Fq "$OLD_URL" \
+            packages/devel/libtool/package.mk
+
+          echo "Replacing URL..."
+
+          sed -i \
+            "s#${OLD_URL}#${NEW_URL}#" \
+            packages/devel/libtool/package.mk
+
+          echo
+          echo "=== Final libtool configuration ==="
+
+          grep '^PKG_VERSION=' \
+            packages/devel/libtool/package.mk
+
+          grep '^PKG_SHA256=' \
+            packages/devel/libtool/package.mk
+
+          grep '^PKG_URL=' \
+            packages/devel/libtool/package.mk
+
+          echo
+          echo "Checking replacement..."
+
+          grep -Fq "$NEW_URL" \
+            packages/devel/libtool/package.mk
+
+      # ============================================================
+      # 8. Проверяем точный Raspberry Pi kernel
+      #
+      # Для LibreELEC 12.2.1:
+      #
+      # commit = 78fd5c93...
+      # kernel  = 6.12.56
+      # ============================================================
+      - name: Verify Raspberry Pi kernel
+        working-directory: libreelec
+        run: |
+          echo "=== Raspberry Pi kernel entry ==="
+
+          sed -n '/^  raspberrypi)/,/^  \*)/p' \
+            packages/linux/package.mk
+
+          echo
+          echo "Checking exact kernel commit..."
+
+          grep -q \
+            'PKG_VERSION="78fd5c93f1568d0dac7c56ee3d497739a63b058e" # 6.12.56' \
+            packages/linux/package.mk
+
+          echo
+          echo "Correct Raspberry Pi kernel 6.12.56 confirmed."
+
+      # ============================================================
+      # 9. Проверяем RPi project configuration
+      # ============================================================
+      - name: Verify RPi configuration
+        working-directory: libreelec
+        run: |
+          echo "=== RPi options ==="
+
+          grep -E \
+            'BOOTLOADER=|KERNEL_TARGET=|KERNEL_MAKE_EXTRACMD=|LINUX=' \
+            projects/RPi/options
+
+          echo
+          echo "Checking required values..."
+
+          grep -q \
+            '^    BOOTLOADER="bcm2835-bootloader"$' \
+            projects/RPi/options
+
+          grep -q \
+            '^    KERNEL_TARGET="zImage"$' \
+            projects/RPi/options
+
+          grep -q \
+            '^    KERNEL_MAKE_EXTRACMD="dtbs"$' \
+            projects/RPi/options
+
+          grep -q \
+            '^    LINUX="raspberrypi"$' \
+            projects/RPi/options
+
+          echo
+          echo "RPi project configuration confirmed."
+
+      # ============================================================
+      # 10. Проверяем, что RPi2 configuration предназначена
+      #     для Pi 2 / Pi 3 и ARMv7
+      # ============================================================
+      - name: Verify RPi2 device configuration
+        working-directory: libreelec
+        run: |
+          echo "=== RPi2 device options ==="
+
+          cat projects/RPi/devices/RPi2/options
+
+          echo
+          echo "Checking Pi 3 support..."
+
+          grep -q \
+            '"Pi 2","Pi 3"' \
+            projects/RPi/devices/RPi2/options
+
+          echo
+          echo "Checking ARMv7 CPU..."
+
+          grep -q \
+            'TARGET_CPU="cortex-a7"' \
+            projects/RPi/devices/RPi2/options
+
+          echo
+          echo "RPi2/Pi3 configuration confirmed."
+
+      # ============================================================
+      # 11. Проверяем исходный kernel config
+      # ============================================================
+      - name: Verify original NFQUEUE configuration
         working-directory: libreelec
         run: |
           CONFIG="projects/RPi/devices/RPi2/linux/linux.arm.conf"
 
-          echo "Before:"
+          echo "Checking:"
+          echo "$CONFIG"
+
+          test -f "$CONFIG"
+
+          echo
+          echo "=== Original NFQUEUE settings ==="
+
           grep -E \
-            'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE' \
-            "$CONFIG" || true
+            '^CONFIG_NETFILTER_ADVANCED=|^# CONFIG_NETFILTER_NETLINK_QUEUE|^# CONFIG_NETFILTER_XT_TARGET_NFQUEUE' \
+            "$CONFIG"
+
+          echo
+          echo "Checking expected original state..."
+
+          grep -q \
+            '^CONFIG_NETFILTER_ADVANCED=y$' \
+            "$CONFIG"
+
+          grep -q \
+            '^# CONFIG_NETFILTER_NETLINK_QUEUE is not set$' \
+            "$CONFIG"
+
+          grep -q \
+            '^# CONFIG_NETFILTER_XT_TARGET_NFQUEUE is not set$' \
+            "$CONFIG"
+
+      # ============================================================
+      # 12. Включаем NFQUEUE как модули
+      # ============================================================
+      - name: Enable NFQUEUE
+        working-directory: libreelec
+        run: |
+          CONFIG="projects/RPi/devices/RPi2/linux/linux.arm.conf"
 
           sed -i \
             's/^# CONFIG_NETFILTER_NETLINK_QUEUE is not set$/CONFIG_NETFILTER_NETLINK_QUEUE=m/' \
@@ -57,70 +296,100 @@ jobs:
             's/^# CONFIG_NETFILTER_XT_TARGET_NFQUEUE is not set$/CONFIG_NETFILTER_XT_TARGET_NFQUEUE=m/' \
             "$CONFIG"
 
-          echo "After:"
+          echo
+          echo "=== NFQUEUE configuration after modification ==="
+
           grep -E \
-            'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE' \
+            '^CONFIG_NETFILTER_ADVANCED=|^CONFIG_NETFILTER_NETLINK_QUEUE=|^CONFIG_NETFILTER_XT_TARGET_NFQUEUE=' \
             "$CONFIG"
 
-      - name: Fix broken libtool mirror URL
+          echo
+          echo "=== Checking final requested values ==="
+
+          grep -q \
+            '^CONFIG_NETFILTER_ADVANCED=y$' \
+            "$CONFIG"
+
+          grep -q \
+            '^CONFIG_NETFILTER_NETLINK_QUEUE=m$' \
+            "$CONFIG"
+
+          grep -q \
+            '^CONFIG_NETFILTER_XT_TARGET_NFQUEUE=m$' \
+            "$CONFIG"
+
+          echo
+          echo "NFQUEUE configuration successfully enabled."
+
+      # ============================================================
+      # 13. Показываем build environment
+      # ============================================================
+      - name: Show build environment
         working-directory: libreelec
+        env:
+          PROJECT: RPi
+          DEVICE: RPi2
+          ARCH: arm
         run: |
-          sed -i \
-            's#http://ftpmirror.gnu.org/libtool/${PKG_NAME}-${PKG_VERSION}.tar.gz#https://ftp.gnu.org/gnu/libtool/${PKG_NAME}-${PKG_VERSION}.tar.gz#' \
-            packages/devel/libtool/package.mk
+          echo "PROJECT=$PROJECT"
+          echo "DEVICE=$DEVICE"
+          echo "ARCH=$ARCH"
 
-          grep 'PKG_URL=' packages/devel/libtool/package.mk
+          test "$PROJECT" = "RPi"
+          test "$DEVICE" = "RPi2"
+          test "$ARCH" = "arm"
 
+      # ============================================================
+      # 14. СОБИРАЕМ Linux package через САМ LibreELEC
+      #
+      # Здесь НЕ используется:
+      #
+      # make modules_prepare
+      # make M=net/netfilter modules
+      #
+      # LibreELEC сам выполняет:
+      #
+      # kernel_make zImage dtbs modules
+      #
+      # и получает Module.symvers.
+      # ============================================================
       - name: Build LibreELEC Linux package
         working-directory: libreelec
         env:
           PROJECT: RPi
-          ARCH: arm
           DEVICE: RPi2
-          THREADCOUNT: 100%
+          ARCH: arm
+          CONCURRENCY_MAKE_LEVEL: 4
           MTVERBOSE: yes
         run: |
           ./scripts/build linux
 
-      - name: Find Linux package output
+      # ============================================================
+      # 15. Находим результат сборки
+      # ============================================================
+      - name: Locate Linux build output
         working-directory: libreelec
         run: |
-          echo "Searching for Linux install directory..."
+          echo "=== Linux build directories ==="
 
-          find build.LibreELEC-RPi.arm-* \
+          find . \
             -maxdepth 3 \
             -type d \
-            -path '*/install_pkg/linux-*' \
+            -name 'install_pkg' \
             -print
-
-      - name: Verify Module.symvers and NFQUEUE modules
-        working-directory: libreelec
-        run: |
-          INSTALL_DIR=$(find build.LibreELEC-RPi.arm-* \
-            -maxdepth 3 \
-            -type d \
-            -path '*/install_pkg/linux-*' \
-            | head -n 1)
-
-          if [ -z "$INSTALL_DIR" ]; then
-            echo "ERROR: Linux install directory not found"
-            exit 1
-          fi
-
-          echo "INSTALL_DIR=$INSTALL_DIR"
-
-          echo
-          echo "=== .image ==="
-          ls -lh "$INSTALL_DIR/.image/"
 
           echo
           echo "=== Module.symvers ==="
-          test -s "$INSTALL_DIR/.image/Module.symvers"
-          ls -lh "$INSTALL_DIR/.image/Module.symvers"
+
+          find build.LibreELEC-RPi.arm-* \
+            -type f \
+            -path '*/.image/Module.symvers' \
+            -print
 
           echo
           echo "=== NFQUEUE modules ==="
-          find "$INSTALL_DIR" \
+
+          find build.LibreELEC-RPi.arm-* \
             -type f \
             \( \
               -name 'nfnetlink_queue.ko' \
@@ -129,68 +398,198 @@ jobs:
             \) \
             -print
 
-          echo
-          echo "=== Kernel version ==="
-          find "$INSTALL_DIR" \
-            -type d \
-            -path '*/lib/modules/*' \
-            -print
+      # ============================================================
+      # 16. Проверяем Module.symvers
+      # ============================================================
+      - name: Verify Module.symvers
+        working-directory: libreelec
+        run: |
+          SYMVERS=$(find build.LibreELEC-RPi.arm-* \
+            -type f \
+            -path '*/.image/Module.symvers' \
+            | head -n 1)
+
+          if [ -z "$SYMVERS" ]; then
+            echo "ERROR: Module.symvers was not generated."
+            exit 1
+          fi
+
+          echo "Module.symvers:"
+          echo "$SYMVERS"
+
+          test -s "$SYMVERS"
 
           echo
-          echo "=== Module information ==="
+          echo "Module.symvers exists and is not empty."
 
-          NFQ=$(find "$INSTALL_DIR" \
+      # ============================================================
+      # 17. Проверяем nfnetlink_queue.ko
+      # ============================================================
+      - name: Verify nfnetlink_queue module
+        working-directory: libreelec
+        run: |
+          NFQUEUE=$(find build.LibreELEC-RPi.arm-* \
             -type f \
             -name 'nfnetlink_queue.ko' \
             | head -n 1)
 
-          XTFQ=$(find "$INSTALL_DIR" \
+          if [ -z "$NFQUEUE" ]; then
+            echo "ERROR: nfnetlink_queue.ko was not generated."
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "$NFQUEUE"
+
+          test -s "$NFQUEUE"
+
+      # ============================================================
+      # 18. Проверяем xt_NFQUEUE.ko
+      # ============================================================
+      - name: Verify xt_NFQUEUE module
+        working-directory: libreelec
+        run: |
+          XTNFQUEUE=$(find build.LibreELEC-RPi.arm-* \
             -type f \
             -name 'xt_NFQUEUE.ko' \
             | head -n 1)
 
-          test -n "$NFQ"
-          test -n "$XTFQ"
+          if [ -z "$XTNFQUEUE" ]; then
+            echo "ERROR: xt_NFQUEUE.ko was not generated."
+            exit 1
+          fi
 
-          modinfo "$NFQ" || true
-          modinfo "$XTFQ" || true
+          echo "Found:"
+          echo "$XTNFQUEUE"
 
+          test -s "$XTNFQUEUE"
+
+      # ============================================================
+      # 19. Проверяем финальный .config
+      # ============================================================
+      - name: Verify generated kernel configuration
+        working-directory: libreelec
+        run: |
+          CONFIG=$(find build.LibreELEC-RPi.arm-* \
+            -type f \
+            -path '*/.image/.config' \
+            | head -n 1)
+
+          if [ -z "$CONFIG" ]; then
+            echo "ERROR: generated .config was not found."
+            exit 1
+          fi
+
+          echo "Generated .config:"
+          echo "$CONFIG"
+
+          echo
+          echo "=== Final NFQUEUE settings ==="
+
+          grep -E \
+            '^CONFIG_NETFILTER_ADVANCED=|^CONFIG_NETFILTER_NETLINK_QUEUE=|^CONFIG_NETFILTER_XT_TARGET_NFQUEUE=' \
+            "$CONFIG"
+
+          echo
+          echo "Checking..."
+
+          grep -q \
+            '^CONFIG_NETFILTER_ADVANCED=y$' \
+            "$CONFIG"
+
+          grep -q \
+            '^CONFIG_NETFILTER_NETLINK_QUEUE=m$' \
+            "$CONFIG"
+
+          grep -q \
+            '^CONFIG_NETFILTER_XT_TARGET_NFQUEUE=m$' \
+            "$CONFIG"
+
+      # ============================================================
+      # 20. Проверяем System.map
+      # ============================================================
+      - name: Verify System.map
+        working-directory: libreelec
+        run: |
+          SYSTEMMAP=$(find build.LibreELEC-RPi.arm-* \
+            -type f \
+            -path '*/.image/System.map' \
+            | head -n 1)
+
+          if [ -z "$SYSTEMMAP" ]; then
+            echo "ERROR: System.map was not found."
+            exit 1
+          fi
+
+          echo "System.map:"
+          echo "$SYSTEMMAP"
+
+          test -s "$SYSTEMMAP"
+
+      # ============================================================
+      # 21. Собираем артефакты
+      # ============================================================
       - name: Prepare artifacts
         working-directory: libreelec
         run: |
+          rm -rf ../artifact
           mkdir -p ../artifact
 
-          INSTALL_DIR=$(find build.LibreELEC-RPi.arm-* \
-            -maxdepth 3 \
-            -type d \
-            -path '*/install_pkg/linux-*' \
+          SYMVERS=$(find build.LibreELEC-RPi.arm-* \
+            -type f \
+            -path '*/.image/Module.symvers' \
             | head -n 1)
 
-          echo "INSTALL_DIR=$INSTALL_DIR"
-
-          find "$INSTALL_DIR" \
+          CONFIG=$(find build.LibreELEC-RPi.arm-* \
             -type f \
-            \( \
-              -name 'nfnetlink_queue.ko' \
-              -o \
-              -name 'xt_NFQUEUE.ko' \
-            \) \
-            -exec cp {} ../artifact/ \;
+            -path '*/.image/.config' \
+            | head -n 1)
 
-          cp "$INSTALL_DIR/.image/Module.symvers" \
-            ../artifact/
+          SYSTEMMAP=$(find build.LibreELEC-RPi.arm-* \
+            -type f \
+            -path '*/.image/System.map' \
+            | head -n 1)
 
-          cp "$INSTALL_DIR/.image/.config" \
-            ../artifact/
+          NFQUEUE=$(find build.LibreELEC-RPi.arm-* \
+            -type f \
+            -name 'nfnetlink_queue.ko' \
+            | head -n 1)
 
-          cp "$INSTALL_DIR/.image/System.map" \
-            ../artifact/
+          XTNFQUEUE=$(find build.LibreELEC-RPi.arm-* \
+            -type f \
+            -name 'xt_NFQUEUE.ko' \
+            | head -n 1)
+
+          test -s "$SYMVERS"
+          test -s "$CONFIG"
+          test -s "$SYSTEMMAP"
+          test -s "$NFQUEUE"
+          test -s "$XTNFQUEUE"
+
+          cp "$SYMVERS" \
+            ../artifact/Module.symvers
+
+          cp "$CONFIG" \
+            ../artifact/.config
+
+          cp "$SYSTEMMAP" \
+            ../artifact/System.map
+
+          cp "$NFQUEUE" \
+            ../artifact/nfnetlink_queue.ko
+
+          cp "$XTNFQUEUE" \
+            ../artifact/xt_NFQUEUE.ko
 
           echo
-          echo "=== Final artifacts ==="
+          echo "=== FINAL ARTIFACTS ==="
+
           ls -lh ../artifact/
 
-      - name: Upload NFQUEUE modules
+      # ============================================================
+      # 22. Загружаем результат
+      # ============================================================
+      - name: Upload NFQUEUE artifacts
         uses: actions/upload-artifact@v4
         with:
           name: libreelec-12.2.1-rpi3-nfqueue
