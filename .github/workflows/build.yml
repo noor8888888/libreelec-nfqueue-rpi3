@@ -1,4 +1,4 @@
-name: Build NFQUEUE modules for LibreELEC RPi3
+name: Build LibreELEC NFQUEUE modules
 
 on:
   workflow_dispatch:
@@ -8,133 +8,120 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build tools
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
-            git \
             bc \
-            bison \
-            flex \
-            libssl-dev \
-            libelf-dev \
-            gcc-arm-linux-gnueabihf \
+            curl \
+            g++ \
+            gcc \
+            git \
+            gperf \
             make \
-            kmod \
-            cpio \
+            openjdk-11-jre-headless \
+            rsync \
+            unzip \
+            xfonts-utils \
+            xsltproc \
             xz-utils \
-            tar \
-            rsync
-
-      - name: Clone exact Raspberry Pi kernel
-        run: |
-          set -e
-
-          git clone \
-            https://github.com/raspberrypi/linux.git \
-            linux
-
-          cd linux
-
-          git checkout 78fd5c93f1568d0dac7c56ee3d497739a63b058e
-
-          echo "=== Raspberry Pi kernel commit ==="
-          git rev-parse HEAD
+            zip \
+            python3 \
+            python3-pip \
+            wget
 
       - name: Clone LibreELEC 12.2.1
         run: |
-          set -e
-
-          git clone \
-            --branch 12.2.1 \
-            --depth 1 \
+          git clone --depth 1 --branch 12.2.1 \
             https://github.com/LibreELEC/LibreELEC.tv.git \
             libreelec
 
-      - name: Copy LibreELEC kernel configuration
+      - name: Enable NFQUEUE
+        working-directory: libreelec
         run: |
-          set -e
+          CONFIG="projects/RPi/devices/RPi2/linux/linux.arm.conf"
 
-          cp \
-            libreelec/projects/RPi/devices/RPi2/linux/linux.arm.conf \
-            linux/.config
-
-          echo "=== LibreELEC kernel configuration ==="
-
+          echo "Before:"
           grep -E \
-            'CONFIG_NETFILTER|CONFIG_NF|CONFIG_XTABLES' \
-            linux/.config | head -100 || true
+            'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE' \
+            "$CONFIG" || true
 
-      - name: Enable required NFQUEUE configuration
-        working-directory: linux
-        run: |
-          set -e
+          sed -i \
+            's/^# CONFIG_NETFILTER_NETLINK_QUEUE is not set$/CONFIG_NETFILTER_NETLINK_QUEUE=m/' \
+            "$CONFIG"
 
-          echo "=== Enabling NFQUEUE ==="
+          sed -i \
+            's/^# CONFIG_NETFILTER_XT_TARGET_NFQUEUE is not set$/CONFIG_NETFILTER_XT_TARGET_NFQUEUE=m/' \
+            "$CONFIG"
 
-          ./scripts/config --enable CONFIG_NETFILTER
-          ./scripts/config --enable CONFIG_NETFILTER_NETLINK
-          ./scripts/config --module CONFIG_NETFILTER_NETLINK_QUEUE
-
-          ./scripts/config --enable CONFIG_NETFILTER_XTABLES
-          ./scripts/config --module CONFIG_NETFILTER_XT_TARGET_NFQUEUE
-
-          echo "=== NFQUEUE configuration before olddefconfig ==="
-
+          echo "After:"
           grep -E \
-            'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE|CONFIG_NETFILTER_NETLINK=|CONFIG_NETFILTER_XTABLES=' \
-            .config || true
+            'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE' \
+            "$CONFIG"
 
-      - name: Prepare kernel configuration
-        working-directory: linux
+      - name: Fix broken libtool mirror URL
+        working-directory: libreelec
         run: |
-          set -e
+          sed -i \
+            's#http://ftpmirror.gnu.org/libtool/${PKG_NAME}-${PKG_VERSION}.tar.gz#https://ftp.gnu.org/gnu/libtool/${PKG_NAME}-${PKG_VERSION}.tar.gz#' \
+            packages/devel/libtool/package.mk
 
-          make \
-            ARCH=arm \
-            CROSS_COMPILE=arm-linux-gnueabihf- \
-            olddefconfig
+          grep 'PKG_URL=' packages/devel/libtool/package.mk
 
-          echo "=== NFQUEUE configuration after olddefconfig ==="
-
-          grep -E \
-            'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE|CONFIG_NETFILTER_NETLINK=|CONFIG_NETFILTER_XTABLES=' \
-            .config || true
-
-      - name: Prepare kernel tree
-        working-directory: linux
+      - name: Build LibreELEC Linux package
+        working-directory: libreelec
+        env:
+          PROJECT: RPi
+          ARCH: arm
+          DEVICE: RPi2
+          THREADCOUNT: 100%
+          MTVERBOSE: yes
         run: |
-          set -e
+          ./scripts/build linux
 
-          make \
-            ARCH=arm \
-            CROSS_COMPILE=arm-linux-gnueabihf- \
-            modules_prepare
-
-      - name: Build nfnetlink_queue module
-        working-directory: linux
+      - name: Find Linux package output
+        working-directory: libreelec
         run: |
-          set -e
+          echo "Searching for Linux install directory..."
 
-          echo "=== Building nfnetlink_queue ==="
+          find build.LibreELEC-RPi.arm-* \
+            -maxdepth 3 \
+            -type d \
+            -path '*/install_pkg/linux-*' \
+            -print
 
-          make -j2 \
-            ARCH=arm \
-            CROSS_COMPILE=arm-linux-gnueabihf- \
-            M=net/netfilter \
-            modules
-
-      - name: Show resulting modules
-        working-directory: linux
+      - name: Verify Module.symvers and NFQUEUE modules
+        working-directory: libreelec
         run: |
+          INSTALL_DIR=$(find build.LibreELEC-RPi.arm-* \
+            -maxdepth 3 \
+            -type d \
+            -path '*/install_pkg/linux-*' \
+            | head -n 1)
+
+          if [ -z "$INSTALL_DIR" ]; then
+            echo "ERROR: Linux install directory not found"
+            exit 1
+          fi
+
+          echo "INSTALL_DIR=$INSTALL_DIR"
+
+          echo
+          echo "=== .image ==="
+          ls -lh "$INSTALL_DIR/.image/"
+
+          echo
+          echo "=== Module.symvers ==="
+          test -s "$INSTALL_DIR/.image/Module.symvers"
+          ls -lh "$INSTALL_DIR/.image/Module.symvers"
+
+          echo
           echo "=== NFQUEUE modules ==="
-
-          find net -type f \
+          find "$INSTALL_DIR" \
+            -type f \
             \( \
               -name 'nfnetlink_queue.ko' \
               -o \
@@ -142,71 +129,70 @@ jobs:
             \) \
             -print
 
-      - name: Check module information
-        working-directory: linux
-        run: |
-          set -e
-
-          echo "=== Module information ==="
-
-          for module in \
-            $(find net -type f \
-              \( \
-                -name 'nfnetlink_queue.ko' \
-                -o \
-                -name 'xt_NFQUEUE.ko' \
-              \)); do
-
-            echo
-            echo "========================================"
-            echo "$module"
-            echo "========================================"
-
-            file "$module"
-
-            modinfo "$module" || true
-
-          done
-
-      - name: Verify required modules exist
-        working-directory: linux
-        run: |
-          set -e
-
-          echo "=== Verifying modules ==="
-
-          test -f net/netfilter/nfnetlink_queue.ko
-          test -f net/netfilter/xt_NFQUEUE.ko
+          echo
+          echo "=== Kernel version ==="
+          find "$INSTALL_DIR" \
+            -type d \
+            -path '*/lib/modules/*' \
+            -print
 
           echo
-          echo "SUCCESS:"
-          echo "nfnetlink_queue.ko exists"
-          echo "xt_NFQUEUE.ko exists"
+          echo "=== Module information ==="
 
-      - name: Package modules
+          NFQ=$(find "$INSTALL_DIR" \
+            -type f \
+            -name 'nfnetlink_queue.ko' \
+            | head -n 1)
+
+          XTFQ=$(find "$INSTALL_DIR" \
+            -type f \
+            -name 'xt_NFQUEUE.ko' \
+            | head -n 1)
+
+          test -n "$NFQ"
+          test -n "$XTFQ"
+
+          modinfo "$NFQ" || true
+          modinfo "$XTFQ" || true
+
+      - name: Prepare artifacts
+        working-directory: libreelec
         run: |
-          set -e
+          mkdir -p ../artifact
 
-          mkdir -p artifact/lib/modules/6.12.56/kernel/net/netfilter
+          INSTALL_DIR=$(find build.LibreELEC-RPi.arm-* \
+            -maxdepth 3 \
+            -type d \
+            -path '*/install_pkg/linux-*' \
+            | head -n 1)
 
-          cp \
-            linux/net/netfilter/nfnetlink_queue.ko \
-            artifact/lib/modules/6.12.56/kernel/net/netfilter/
+          echo "INSTALL_DIR=$INSTALL_DIR"
 
-          cp \
-            linux/net/netfilter/xt_NFQUEUE.ko \
-            artifact/lib/modules/6.12.56/kernel/net/netfilter/
+          find "$INSTALL_DIR" \
+            -type f \
+            \( \
+              -name 'nfnetlink_queue.ko' \
+              -o \
+              -name 'xt_NFQUEUE.ko' \
+            \) \
+            -exec cp {} ../artifact/ \;
 
-          echo "=== Artifact contents ==="
+          cp "$INSTALL_DIR/.image/Module.symvers" \
+            ../artifact/
 
-          find artifact -type f -ls
+          cp "$INSTALL_DIR/.image/.config" \
+            ../artifact/
 
-          tar -czf \
-            nfqueue-modules-rpi3-6.12.56.tar.gz \
-            -C artifact .
+          cp "$INSTALL_DIR/.image/System.map" \
+            ../artifact/
+
+          echo
+          echo "=== Final artifacts ==="
+          ls -lh ../artifact/
 
       - name: Upload NFQUEUE modules
         uses: actions/upload-artifact@v4
         with:
-          name: nfqueue-modules-rpi3-6.12.56
-          path: nfqueue-modules-rpi3-6.12.56.tar.gz
+          name: libreelec-12.2.1-rpi3-nfqueue
+          path: artifact/
+          if-no-files-found: error
