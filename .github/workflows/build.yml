@@ -11,7 +11,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -21,54 +21,67 @@ jobs:
             flex \
             libssl-dev \
             libelf-dev \
-            make \
             gcc-arm-linux-gnueabihf \
-            crossbuild-essential-armhf \
-            rsync \
-            ccache \
-            python3 \
-            unzip \
-            kmod
+            make \
+            kmod \
+            cpio \
+            xz-utils \
+            tar
 
-      - name: Clone LibreELEC 12.2.1
+      - name: Clone exact Raspberry Pi kernel
         run: |
-          git clone --branch 12.2.1 \
-            https://github.com/LibreELEC/LibreELEC.tv.git
+          git clone https://github.com/raspberrypi/linux.git linux
+          cd linux
+          git checkout 78fd5c93f1568d0dac7c56ee3d497739a63b058e
 
-      - name: Download RPi2 sources
-        working-directory: LibreELEC.tv
+      - name: Copy LibreELEC RPi2 config
         run: |
-          PROJECT=RPi DEVICE=RPi2 ARCH=arm tools/download-tool
+          git clone --branch 12.2.1 --depth 1 \
+            https://github.com/LibreELEC/LibreELEC.tv.git libreelec
 
-      - name: Enable NFQUEUE
-        working-directory: LibreELEC.tv
+          cp \
+            libreelec/projects/RPi/devices/RPi2/linux/linux.arm.conf \
+            linux/.config
+
+      - name: Enable NFQUEUE modules
+        working-directory: linux
         run: |
-          CONFIG=projects/RPi/devices/RPi2/linux/linux.arm.conf
-
           sed -i \
             's/^# CONFIG_NETFILTER_NETLINK_QUEUE is not set$/CONFIG_NETFILTER_NETLINK_QUEUE=m/' \
-            "$CONFIG"
+            .config
 
           sed -i \
             's/^# CONFIG_NETFILTER_XT_TARGET_NFQUEUE is not set$/CONFIG_NETFILTER_XT_TARGET_NFQUEUE=m/' \
-            "$CONFIG"
+            .config
 
-          echo "=== NFQUEUE CONFIG ==="
+          echo "=== Requested configuration ==="
           grep -E \
             'CONFIG_NETFILTER_NETLINK_QUEUE|CONFIG_NETFILTER_XT_TARGET_NFQUEUE' \
-            "$CONFIG"
+            .config
 
-      - name: Build Linux package
-        working-directory: LibreELEC.tv
+      - name: Prepare kernel tree
+        working-directory: linux
         run: |
-          PROJECT=RPi DEVICE=RPi2 ARCH=arm \
-            scripts/build linux
+          make ARCH=arm \
+            CROSS_COMPILE=arm-linux-gnueabihf- \
+            olddefconfig
 
-      - name: Locate modules
-        working-directory: LibreELEC.tv
+          make ARCH=arm \
+            CROSS_COMPILE=arm-linux-gnueabihf- \
+            modules_prepare
+
+      - name: Build NFQUEUE modules
+        working-directory: linux
         run: |
-          echo "=== NFQUEUE MODULES ==="
+          make -j2 ARCH=arm \
+            CROSS_COMPILE=arm-linux-gnueabihf- \
+            M=net/netfilter \
+            modules
 
+      - name: Find modules
+        working-directory: linux
+        run: |
+          echo "=== Found modules ==="
           find . -type f \
             \( \
               -name 'nfnetlink_queue.ko' \
@@ -77,24 +90,27 @@ jobs:
             \) \
             -print
 
-      - name: Verify modules
-        working-directory: LibreELEC.tv
+      - name: Check module metadata
+        working-directory: linux
         run: |
-          echo "=== MODINFO ==="
+          echo "=== Module metadata ==="
 
-          find . -type f \
-            \( \
+          for module in \
+            $(find . -type f \( \
               -name 'nfnetlink_queue.ko' \
               -o \
               -name 'xt_NFQUEUE.ko' \
-            \) \
-            -exec modinfo {} \;
+            \)); do
+            echo "----- $module -----"
+            modinfo "$module" || true
+            file "$module"
+          done
 
-      - name: Prepare artifact
+      - name: Package modules
         run: |
           mkdir -p artifact/lib/modules/6.12.56
 
-          find LibreELEC.tv -type f \
+          find linux -type f \
             \( \
               -name 'nfnetlink_queue.ko' \
               -o \
@@ -102,7 +118,7 @@ jobs:
             \) \
             -exec cp {} artifact/lib/modules/6.12.56/ \;
 
-          echo "=== ARTIFACT ==="
+          echo "=== Artifact contents ==="
           find artifact -type f -ls
 
           tar -czf \
